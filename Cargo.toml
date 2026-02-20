@@ -27,6 +27,7 @@ members = [
   "crates/telegram",
   "crates/tools",
   "crates/voice",
+  "crates/wecom",
 ]
 resolver = "2"
 
@@ -183,6 +184,7 @@ moltis-skills     = { path = "crates/skills" }
 moltis-telegram   = { path = "crates/telegram" }
 moltis-tools      = { path = "crates/tools" }
 moltis-voice      = { path = "crates/voice" }
+moltis-wecom      = { path = "crates/wecom" }
 
 [profile.release]
 lto            = "thin"
