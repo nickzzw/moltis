@@ -31,15 +31,37 @@ cargo test -p moltis-wecom
 
 ## 修改的上游文件
 
-### 1. Cargo.toml
+### 1. Cargo.toml ⚠️ 可能冲突
 **修改位置**: 
-- L28: 添加 `"crates/wecom"` 到 workspace members
-- L183: 添加 `moltis-wecom = { path = "crates/wecom" }` 到 workspace dependencies
+- **第 30 行附近**: 在 `members` 数组末尾添加 `"crates/wecom",`
+- **第 184 行附近**: 在 workspace dependencies 末尾添加 `moltis-wecom = { path = "crates/wecom" }`
 
 **原因**: 将 wecom 模块注册到 workspace
 
-### 2. Cargo.lock
+**冲突风险**: 🟡 中等（如果上游也在末尾添加新 crate）
+
+**冲突解决**:
+```toml
+# 如果冲突，保留双方的修改：
+  "crates/voice",
+  "crates/upstream-new-crate",  # 上游添加的（保留）
+  "crates/wecom",               # 你添加的（保留）
+]
+```
+
+### 2. Cargo.lock ⚠️ 经常冲突
 **修改**: 自动生成的依赖锁文件更新
+
+**冲突风险**: 🟠 高（几乎每次上游更新都会冲突）
+
+**冲突解决**:
+```bash
+# 简单粗暴：删除重新生成
+rm Cargo.lock
+cargo build
+git add Cargo.lock
+git rebase --continue
+```
 
 ## 配置示例
 
