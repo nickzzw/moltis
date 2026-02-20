@@ -125,9 +125,9 @@
   </button>
 
   <div class="header-actions">
-    <button id="settingsBtn" class="header-link-btn" title="Settings">
+    <button id="settingsBtn" class="header-link-btn" title="Settings" data-i18n-title="header.settings">
       <span class="icon icon-settings"></span>
-      <span class="header-link-label">Settings</span>
+      <span class="header-link-label" data-i18n="header.settings">Settings</span>
     </button>
     <a
       href="https://github.com/moltis-org/moltis/issues/new"
@@ -135,9 +135,10 @@
       rel="noopener noreferrer"
       class="header-link-btn"
       title="Report an issue"
+      data-i18n-title="header.report_issue"
     >
       <span class="icon icon-link"></span>
-      <span class="header-link-label">Report issue</span>
+      <span class="header-link-label" data-i18n="header.report_issue">Report issue</span>
     </a>
   </div>
 
@@ -562,5 +563,10 @@ endpoint = "http://localhost:8000"</code>
 </template>
 
 <script nonce="{{ nonce }}" type="module" src="{{ asset_prefix }}js/app.js"></script>
+<!-- 中文汉化模块 -->
+<script nonce="{{ nonce }}" type="module">
+  import { initI18n } from '{{ asset_prefix }}js/i18n-zh.js';
+  initI18n();
+</script>
 </body>
 </html>
