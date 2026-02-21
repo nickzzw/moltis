@@ -10,6 +10,7 @@ use {
 use {
     moltis_channels::{
         ChannelAttachment, ChannelEvent, ChannelEventSink, ChannelMessageMeta, ChannelReplyTarget,
+        ChannelType,
     },
     moltis_sessions::metadata::SqliteSessionMetadata,
 };
@@ -45,6 +46,13 @@ async fn resolve_channel_session(
         return key;
     }
     default_channel_session_key(target)
+}
+
+fn channel_session_label(channel_type: ChannelType, index: usize) -> String {
+    match channel_type {
+        ChannelType::Telegram => format!("Telegram {index}"),
+        ChannelType::Wecom => format!("WeCom {index}"),
+    }
 }
 
 fn slash_command_name(text: &str) -> Option<&str> {
@@ -170,7 +178,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .await;
                     let n = existing.len() + 1;
                     let _ = session_meta
-                        .upsert(&session_key, Some(format!("Telegram {n}")))
+                        .upsert(&session_key, Some(channel_session_label(reply_to.channel_type, n)))
                         .await;
                 }
                 session_meta
@@ -267,7 +275,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
             // Send a repeating "typing" indicator every 4s until chat.send()
             // completes. Telegram's typing status expires after ~5s.
-            let send_result = if let Some(outbound) = state.services.channel_outbound_arc() {
+            let send_result = if let Some(outbound) =
+                state.services.channel_outbound_for(reply_to.channel_type)
+            {
                 let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
                 let account_id = reply_to.account_id.clone();
                 let chat_id = reply_to.chat_id.clone();
@@ -321,7 +331,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 error!("channel dispatch_to_chat failed: {e}");
                 // Send the error back to the originating channel so the user
                 // knows something went wrong.
-                if let Some(outbound) = state.services.channel_outbound_arc() {
+                if let Some(outbound) = state.services.channel_outbound_for(reply_to.channel_type) {
                     let error_msg = format!("⚠️ {e}");
                     if let Err(send_err) = outbound
                         .send_text(
@@ -356,7 +366,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             // cancel itself after this call returns.
 
             // Broadcast an event so the UI can update.
-            let channel_type: moltis_channels::ChannelType = match channel_type.parse() {
+            let channel_type: ChannelType = match channel_type.parse() {
                 Ok(ct) => ct,
                 Err(e) => {
                     warn!("request_disable_account: {e}");
@@ -630,7 +640,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .await;
                 let n = existing.len() + 1;
                 let _ = session_meta
-                    .upsert(&session_key, Some(format!("Telegram {n}")))
+                    .upsert(&session_key, Some(channel_session_label(reply_to.channel_type, n)))
                     .await;
             }
             session_meta
@@ -714,7 +724,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
         }
 
         // Send typing indicator and dispatch to chat
-        let send_result = if let Some(outbound) = state.services.channel_outbound_arc() {
+        let send_result = if let Some(outbound) =
+            state.services.channel_outbound_for(reply_to.channel_type)
+        {
             let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
             let account_id = reply_to.account_id.clone();
             let chat_id = reply_to.chat_id.clone();
@@ -738,7 +750,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
         if let Err(e) = send_result {
             error!("channel dispatch_to_chat_with_attachments failed: {e}");
-            if let Some(outbound) = state.services.channel_outbound_arc() {
+            if let Some(outbound) = state.services.channel_outbound_for(reply_to.channel_type) {
                 let error_msg = format!("⚠️ {e}");
                 if let Err(send_err) = outbound
                     .send_text(
@@ -795,7 +807,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
                 // Create the new session entry with channel binding.
                 session_metadata
-                    .upsert(&new_key, Some(format!("Telegram {n}")))
+                    .upsert(&new_key, Some(channel_session_label(reply_to.channel_type, n)))
                     .await
                     .map_err(|e| anyhow!("failed to create session: {e}"))?;
                 session_metadata

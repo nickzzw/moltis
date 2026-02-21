@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- WeCom channel integration with encrypted webhook support and agent-mode messaging.
+- WeCom voice messaging support (receive + reply with TTS audio, AMR conversion).
 
 ### Changed
 

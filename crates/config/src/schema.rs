@@ -1004,6 +1004,88 @@ pub struct ChannelsConfig {
     /// Telegram bot accounts, keyed by account ID.
     #[serde(default)]
     pub telegram: HashMap<String, serde_json::Value>,
+    /// WeCom agent accounts, keyed by account ID.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_wecom_accounts",
+        serialize_with = "serialize_wecom_accounts"
+    )]
+    pub wecom: HashMap<String, serde_json::Value>,
+}
+
+fn deserialize_wecom_accounts<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let serde_json::Value::Object(map) = value else {
+        return Err(serde::de::Error::custom(
+            "channels.wecom must be a table of account configs",
+        ));
+    };
+
+    if map.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let has_config_keys = map.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "account_id"
+                | "corp_id"
+                | "agent_id"
+                | "corp_secret"
+                | "token"
+                | "encoding_aes_key"
+                | "welcome_text"
+                | "allow_from"
+        )
+    });
+
+    if has_config_keys {
+        let mut config_map = map;
+        let mut account_id = "default".to_string();
+        if let Some(value) = config_map.remove("account_id") {
+            let Some(id) = value.as_str() else {
+                return Err(serde::de::Error::custom(
+                    "channels.wecom.account_id must be a string",
+                ));
+            };
+            if !id.trim().is_empty() {
+                account_id = id.to_string();
+            }
+        }
+
+        let mut accounts = HashMap::new();
+        accounts.insert(account_id, serde_json::Value::Object(config_map));
+        return Ok(accounts);
+    }
+
+    let is_account_map = map.values().all(|value| matches!(value, serde_json::Value::Object(_)));
+    if !is_account_map {
+        return Err(serde::de::Error::custom(
+            "channels.wecom must be a table of account configs or a single config table",
+        ));
+    }
+
+    Ok(map.into_iter().collect())
+}
+
+fn serialize_wecom_accounts<S>(
+    accounts: &HashMap<String, serde_json::Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if accounts.len() == 1 {
+        if let Some(value) = accounts.get("default") {
+            return value.serialize(serializer);
+        }
+    }
+    accounts.serialize(serializer)
 }
 
 /// TLS configuration for the gateway HTTPS server.
@@ -1846,6 +1928,56 @@ OPENROUTER_API_KEY = "sk-or-test"
     fn chat_config_toml_missing_queue_mode_defaults_to_followup() {
         let cfg: ChatConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.message_queue_mode, MessageQueueMode::Followup);
+    }
+
+    #[test]
+    fn wecom_channels_single_table_deserializes() {
+        let toml = r#"
+[channels.wecom]
+corp_id = "ww123"
+agent_id = 1000002
+corp_secret = "secret"
+allow_from = ["*"]
+"#;
+        let config: MoltisConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.channels.wecom.len(), 1);
+        let (account_id, value) = config.channels.wecom.iter().next().unwrap();
+        assert_eq!(account_id, "default");
+        assert_eq!(value.get("corp_id").and_then(|v| v.as_str()), Some("ww123"));
+    }
+
+    #[test]
+    fn wecom_channels_single_table_respects_account_id() {
+        let toml = r#"
+[channels.wecom]
+account_id = "team-a"
+corp_id = "ww123"
+agent_id = 1000002
+corp_secret = "secret"
+"#;
+        let config: MoltisConfig = toml::from_str(toml).unwrap();
+        assert!(config.channels.wecom.contains_key("team-a"));
+        let value = config.channels.wecom.get("team-a").unwrap();
+        assert!(value.get("account_id").is_none());
+    }
+
+    #[test]
+    fn wecom_channels_account_map_deserializes() {
+        let toml = r#"
+[channels.wecom.bot-a]
+corp_id = "ww123"
+agent_id = 1000001
+corp_secret = "secret-a"
+
+[channels.wecom.bot-b]
+corp_id = "ww456"
+agent_id = 1000002
+corp_secret = "secret-b"
+"#;
+        let config: MoltisConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.channels.wecom.len(), 2);
+        assert!(config.channels.wecom.contains_key("bot-a"));
+        assert!(config.channels.wecom.contains_key("bot-b"));
     }
 
     #[test]

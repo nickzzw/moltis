@@ -28,7 +28,8 @@ use std::process::Command;
 use {
     axum::{
         Router,
-        extract::{ConnectInfo, State, WebSocketUpgrade},
+        extract::{ConnectInfo, Path, RawQuery, State, WebSocketUpgrade},
+        http::StatusCode,
         response::{IntoResponse, Json},
         routing::get,
     },
@@ -45,10 +46,7 @@ use {
 };
 
 #[cfg(feature = "web-ui")]
-use axum::{
-    extract::{Path, Query},
-    http::StatusCode,
-};
+use axum::extract::Query;
 #[cfg(feature = "web-ui")]
 use axum_extra::extract::{
     CookieJar,
@@ -254,7 +252,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
         let outbound = self
             .state
             .services
-            .channel_outbound_arc()
+            .channel_outbound_for(reply_target.channel_type)
             .ok_or_else(|| anyhow::anyhow!("no channel outbound available"))?;
         outbound
             .send_text(
@@ -704,6 +702,45 @@ fn add_feature_routes(routes: Router<AppState>) -> Router<AppState> {
     routes
 }
 
+async fn wecom_webhook_get(
+    State(state): State<AppState>,
+    Path(account_id): Path<String>,
+    RawQuery(query): RawQuery,
+) -> impl IntoResponse {
+    handle_wecom_webhook_request(state, account_id, query, None).await
+}
+
+async fn wecom_webhook_post(
+    State(state): State<AppState>,
+    Path(account_id): Path<String>,
+    RawQuery(query): RawQuery,
+    body: String,
+) -> impl IntoResponse {
+    handle_wecom_webhook_request(state, account_id, query, Some(body)).await
+}
+
+async fn handle_wecom_webhook_request(
+    state: AppState,
+    account_id: String,
+    query: Option<String>,
+    body: Option<String>,
+) -> axum::response::Response {
+    let query = query.unwrap_or_default();
+    match state
+        .gateway
+        .services
+        .channel
+        .webhook("wecom", &account_id, &query, body.as_deref())
+        .await
+    {
+        Ok(reply) => (StatusCode::OK, reply).into_response(),
+        Err(e) => {
+            warn!(account_id, error = %e, "wecom webhook failed");
+            (StatusCode::BAD_REQUEST, format!("wecom webhook error: {e}")).into_response()
+        },
+    }
+}
+
 /// Build the CORS layer with dynamic host-based origin validation.
 ///
 /// Instead of `allow_origin(Any)`, this validates the `Origin` header against the
@@ -845,7 +882,11 @@ pub fn build_gateway_app(
 
     let mut router = Router::new()
         .route("/health", get(health_handler))
-        .route("/ws/chat", get(ws_upgrade_handler));
+        .route("/ws/chat", get(ws_upgrade_handler))
+        .route(
+            "/api/channels/wecom/{account_id}/webhook",
+            get(wecom_webhook_get).post(wecom_webhook_post),
+        );
 
     // Nest auth routes if credential store is available.
     if let Some(ref cred_store) = state.credential_store {
@@ -912,7 +953,11 @@ pub fn build_gateway_app(
 
     let mut router = Router::new()
         .route("/health", get(health_handler))
-        .route("/ws/chat", get(ws_upgrade_handler));
+        .route("/ws/chat", get(ws_upgrade_handler))
+        .route(
+            "/api/channels/wecom/{account_id}/webhook",
+            get(wecom_webhook_get).post(wecom_webhook_post),
+        );
 
     // Add Prometheus metrics endpoint (unauthenticated for scraping).
     #[cfg(feature = "prometheus")]
@@ -2159,21 +2204,26 @@ pub async fn start_gateway(
     // Wire channel store and Telegram channel service.
     {
         use moltis_channels::store::ChannelStore;
+        use moltis_channels::ChannelEventSink;
 
         let channel_store: Arc<dyn ChannelStore> = Arc::new(
             crate::channel_store::SqliteChannelStore::new(db_pool.clone()),
         );
 
-        let channel_sink = Arc::new(crate::channel_events::GatewayChannelEventSink::new(
-            Arc::clone(&deferred_state),
-        ));
+        let channel_sink: Arc<dyn ChannelEventSink> =
+            Arc::new(crate::channel_events::GatewayChannelEventSink::new(
+                Arc::clone(&deferred_state),
+            ));
         let mut tg_plugin = moltis_telegram::TelegramPlugin::new()
             .with_message_log(Arc::clone(&message_log))
-            .with_event_sink(channel_sink);
+            .with_event_sink(Arc::clone(&channel_sink));
+        let mut wecom_plugin = moltis_wecom::WecomChannelPlugin::new()
+            .with_message_log(Arc::clone(&message_log))
+            .with_event_sink(Arc::clone(&channel_sink));
 
         // Start channels from config file (these take precedence).
         let tg_accounts = &config.channels.telegram;
-        let mut started: HashSet<String> = HashSet::new();
+        let mut started_tg: HashSet<String> = HashSet::new();
         for (account_id, account_config) in tg_accounts {
             if let Err(e) = tg_plugin
                 .start_account(account_id, account_config.clone())
@@ -2181,7 +2231,20 @@ pub async fn start_gateway(
             {
                 tracing::warn!(account_id, "failed to start telegram account: {e}");
             } else {
-                started.insert(account_id.clone());
+                started_tg.insert(account_id.clone());
+            }
+        }
+
+        let wecom_accounts = &config.channels.wecom;
+        let mut started_wecom: HashSet<String> = HashSet::new();
+        for (account_id, account_config) in wecom_accounts {
+            if let Err(e) = wecom_plugin
+                .start_account(account_id, account_config.clone())
+                .await
+            {
+                tracing::warn!(account_id, "failed to start wecom account: {e}");
+            } else {
+                started_wecom.insert(account_id.clone());
             }
         }
 
@@ -2190,25 +2253,60 @@ pub async fn start_gateway(
             Ok(stored) => {
                 info!("{} stored channel(s) found in database", stored.len());
                 for ch in stored {
-                    if started.contains(&ch.account_id) {
-                        info!(
-                            account_id = ch.account_id,
-                            "skipping stored channel (already started from config)"
-                        );
-                        continue;
-                    }
-                    info!(
-                        account_id = ch.account_id,
-                        channel_type = ch.channel_type,
-                        "starting stored channel"
-                    );
-                    if let Err(e) = tg_plugin.start_account(&ch.account_id, ch.config).await {
-                        tracing::warn!(
-                            account_id = ch.account_id,
-                            "failed to start stored telegram account: {e}"
-                        );
-                    } else {
-                        started.insert(ch.account_id);
+                    match ch.channel_type.as_str() {
+                        "telegram" => {
+                            if started_tg.contains(&ch.account_id) {
+                                info!(
+                                    account_id = ch.account_id,
+                                    "skipping stored channel (already started from config)"
+                                );
+                                continue;
+                            }
+                            info!(
+                                account_id = ch.account_id,
+                                channel_type = ch.channel_type,
+                                "starting stored channel"
+                            );
+                            if let Err(e) = tg_plugin.start_account(&ch.account_id, ch.config).await {
+                                tracing::warn!(
+                                    account_id = ch.account_id,
+                                    "failed to start stored telegram account: {e}"
+                                );
+                            } else {
+                                started_tg.insert(ch.account_id);
+                            }
+                        },
+                        "wecom" => {
+                            if started_wecom.contains(&ch.account_id) {
+                                info!(
+                                    account_id = ch.account_id,
+                                    "skipping stored channel (already started from config)"
+                                );
+                                continue;
+                            }
+                            info!(
+                                account_id = ch.account_id,
+                                channel_type = ch.channel_type,
+                                "starting stored channel"
+                            );
+                            if let Err(e) =
+                                wecom_plugin.start_account(&ch.account_id, ch.config).await
+                            {
+                                tracing::warn!(
+                                    account_id = ch.account_id,
+                                    "failed to start stored wecom account: {e}"
+                                );
+                            } else {
+                                started_wecom.insert(ch.account_id);
+                            }
+                        },
+                        other => {
+                            tracing::warn!(
+                                account_id = ch.account_id,
+                                channel_type = other,
+                                "unsupported stored channel type"
+                            );
+                        },
                     }
                 }
             },
@@ -2217,18 +2315,25 @@ pub async fn start_gateway(
             },
         }
 
-        if !started.is_empty() {
-            info!("{} telegram account(s) started", started.len());
+        if !started_tg.is_empty() {
+            info!("{} telegram account(s) started", started_tg.len());
+        }
+        if !started_wecom.is_empty() {
+            info!("{} wecom account(s) started", started_wecom.len());
         }
 
         // Grab shared outbound adapters before moving tg_plugin into the channel service.
         let tg_outbound = tg_plugin.shared_outbound();
         let tg_stream_outbound = tg_plugin.shared_stream_outbound();
-        services = services.with_channel_outbound(tg_outbound);
+        services = services.with_channel_outbound(moltis_channels::ChannelType::Telegram, tg_outbound);
         services = services.with_channel_stream_outbound(tg_stream_outbound);
+        let wecom_outbound = wecom_plugin.shared_outbound();
+        services =
+            services.with_channel_outbound(moltis_channels::ChannelType::Wecom, wecom_outbound);
 
         services.channel = Arc::new(crate::channel::LiveChannelService::new(
             tg_plugin,
+            wecom_plugin,
             channel_store,
             Arc::clone(&message_log),
             Arc::clone(&session_metadata),

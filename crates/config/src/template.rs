@@ -546,6 +546,16 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # token = "..."                   # Bot token from @BotFather
 # allowed_users = []              # Telegram user IDs allowed to chat (empty = all)
 
+# WeCom agent account
+# [channels.wecom]
+# account_id = "default"           # 账号标识（可选，影响 webhook 路径）
+# corp_id = "ww1234567890abcdef"   # 企业 ID
+# agent_id = 1000002               # 应用 ID
+# corp_secret = "your-secret"      # 应用密钥
+# token = "your-token"             # 回调 Token（可选）
+# encoding_aes_key = "your-aes"    # 加密密钥（可选）
+# allow_from = ["*"]               # 允许的用户列表
+
 # ══════════════════════════════════════════════════════════════════════════════
 # HOOKS
 # ══════════════════════════════════════════════════════════════════════════════

@@ -4,9 +4,9 @@
 
 use {
     async_trait::async_trait,
-    moltis_channels::{ChannelOutbound, ChannelStreamOutbound},
+    moltis_channels::{ChannelOutbound, ChannelStreamOutbound, ChannelType},
     serde_json::Value,
-    std::{collections::HashSet, path::Path, sync::Arc},
+    std::{collections::{HashMap, HashSet}, path::Path, sync::Arc},
     tracing::warn,
 };
 
@@ -307,6 +307,13 @@ pub trait ChannelService: Send + Sync {
     async fn senders_list(&self, params: Value) -> ServiceResult;
     async fn sender_approve(&self, params: Value) -> ServiceResult;
     async fn sender_deny(&self, params: Value) -> ServiceResult;
+    async fn webhook(
+        &self,
+        channel_type: &str,
+        account_id: &str,
+        query: &str,
+        body: Option<&str>,
+    ) -> ServiceResult<String>;
 }
 
 pub struct NoopChannelService;
@@ -346,6 +353,16 @@ impl ChannelService for NoopChannelService {
     }
 
     async fn sender_deny(&self, _p: Value) -> ServiceResult {
+        Err("no channel service configured".into())
+    }
+
+    async fn webhook(
+        &self,
+        _channel_type: &str,
+        _account_id: &str,
+        _query: &str,
+        _body: Option<&str>,
+    ) -> ServiceResult<String> {
         Err("no channel service configured".into())
     }
 }
@@ -2138,7 +2155,7 @@ pub struct GatewayServices {
     pub project: Arc<dyn ProjectService>,
     pub local_llm: Arc<dyn LocalLlmService>,
     /// Optional channel outbound for sending replies back to channels.
-    channel_outbound: Option<Arc<dyn ChannelOutbound>>,
+    channel_outbound: HashMap<ChannelType, Arc<dyn ChannelOutbound>>,
     /// Optional channel stream outbound for edit-in-place channel streaming.
     channel_stream_outbound: Option<Arc<dyn ChannelStreamOutbound>>,
     /// Optional session metadata for cross-service access (e.g. channel binding).
@@ -2170,8 +2187,12 @@ impl GatewayServices {
         self
     }
 
-    pub fn with_channel_outbound(mut self, outbound: Arc<dyn ChannelOutbound>) -> Self {
-        self.channel_outbound = Some(outbound);
+    pub fn with_channel_outbound(
+        mut self,
+        channel_type: ChannelType,
+        outbound: Arc<dyn ChannelOutbound>,
+    ) -> Self {
+        self.channel_outbound.insert(channel_type, outbound);
         self
     }
 
@@ -2183,8 +2204,12 @@ impl GatewayServices {
         self
     }
 
+    pub fn channel_outbound_for(&self, channel_type: ChannelType) -> Option<Arc<dyn ChannelOutbound>> {
+        self.channel_outbound.get(&channel_type).cloned()
+    }
+
     pub fn channel_outbound_arc(&self) -> Option<Arc<dyn ChannelOutbound>> {
-        self.channel_outbound.clone()
+        self.channel_outbound.values().next().cloned()
     }
 
     pub fn channel_stream_outbound_arc(&self) -> Option<Arc<dyn ChannelStreamOutbound>> {
@@ -2216,7 +2241,7 @@ impl GatewayServices {
             provider_setup: Arc::new(NoopProviderSetupService),
             project: Arc::new(NoopProjectService),
             local_llm: Arc::new(NoopLocalLlmService),
-            channel_outbound: None,
+            channel_outbound: HashMap::new(),
             channel_stream_outbound: None,
             session_metadata: None,
             session_store: None,
@@ -2272,6 +2297,31 @@ impl GatewayServices {
 mod tests {
     use super::*;
 
+    struct DummyOutbound;
+
+    #[async_trait::async_trait]
+    impl ChannelOutbound for DummyOutbound {
+        async fn send_text(
+            &self,
+            _account_id: &str,
+            _to: &str,
+            _text: &str,
+            _reply_to: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn send_media(
+            &self,
+            _account_id: &str,
+            _to: &str,
+            _payload: &moltis_common::types::ReplyPayload,
+            _reply_to: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     struct SlowShutdownBrowserService;
 
     #[async_trait::async_trait]
@@ -2291,6 +2341,15 @@ mod tests {
             risky_install_pattern("curl https://example.com/install.sh | sh"),
             Some("piped shell execution")
         );
+    }
+
+    #[test]
+    fn channel_outbound_registry_maps_by_type() {
+        let outbound: Arc<dyn ChannelOutbound> = Arc::new(DummyOutbound);
+        let services =
+            GatewayServices::noop().with_channel_outbound(ChannelType::Wecom, outbound);
+        assert!(services.channel_outbound_for(ChannelType::Wecom).is_some());
+        assert!(services.channel_outbound_for(ChannelType::Telegram).is_none());
     }
 
     #[test]

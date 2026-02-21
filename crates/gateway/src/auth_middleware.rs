@@ -152,6 +152,7 @@ fn is_public_path(path: &str) -> bool {
         path,
         "/health" | "/auth/callback" | "/manifest.json" | "/sw.js" | "/login"
     ) || path.starts_with("/api/auth/")
+        || path.starts_with("/api/channels/wecom/")
         || path.starts_with("/assets/")
         || path.starts_with("/share/")
 }

@@ -9,6 +9,7 @@ use {
 #[serde(rename_all = "lowercase")]
 pub enum ChannelType {
     Telegram,
+    Wecom,
     // Future: Discord, Slack, WhatsApp, etc.
 }
 
@@ -17,6 +18,7 @@ impl ChannelType {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Telegram => "telegram",
+            Self::Wecom => "wecom",
         }
     }
 }
@@ -33,8 +35,22 @@ impl std::str::FromStr for ChannelType {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "telegram" => Ok(Self::Telegram),
+            "wecom" => Ok(Self::Wecom),
             other => Err(format!("unknown channel type: {other}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_type_roundtrip() {
+        assert_eq!(ChannelType::Telegram.as_str(), "telegram");
+        assert_eq!(ChannelType::Wecom.as_str(), "wecom");
+        assert_eq!("telegram".parse::<ChannelType>().unwrap(), ChannelType::Telegram);
+        assert_eq!("wecom".parse::<ChannelType>().unwrap(), ChannelType::Wecom);
     }
 }
 

@@ -746,6 +746,32 @@ fn apply_voice_reply_suffix(
     format!("{system_prompt}{VOICE_REPLY_SUFFIX}")
 }
 
+const WECOM_VOICE_GUARDRAILS: &str = "\n\n\
+## WeCom Voice Channel\n\n\
+You are responding over a WeCom voice channel. Respond only to the latest user \
+message. Do not mention previous test results, tool failures, or configuration \
+steps. If you could not understand the latest voice message, ask the user to \
+repeat it briefly.\n";
+
+fn apply_wecom_voice_guardrails(
+    system_prompt: String,
+    session_key: &str,
+    desired_reply_medium: ReplyMedium,
+    runtime_context: Option<&PromptRuntimeContext>,
+) -> String {
+    if desired_reply_medium != ReplyMedium::Voice || !session_key.starts_with("wecom:") {
+        return system_prompt;
+    }
+
+    if let Some(tail) = runtime_datetime_prompt_tail(runtime_context)
+        && let Some(prefix) = system_prompt.strip_suffix(&tail)
+    {
+        return format!("{prefix}{WECOM_VOICE_GUARDRAILS}{tail}");
+    }
+
+    format!("{system_prompt}{WECOM_VOICE_GUARDRAILS}")
+}
+
 fn parse_explicit_shell_command(text: &str) -> Option<&str> {
     let trimmed = text.trim_start();
     let rest = trimmed.strip_prefix("/sh")?;
@@ -1220,6 +1246,10 @@ fn apply_runtime_tool_filters(
     // only `web_fetch` and preventing `create_skill` from being called).
     // Tool availability here is controlled by configured runtime policy.
     base_registry.clone_allowed_by(|name| policy.is_allowed(name))
+}
+
+fn should_disable_speak_tool(session_key: &str, desired_reply_medium: ReplyMedium) -> bool {
+    desired_reply_medium == ReplyMedium::Voice && session_key.starts_with("wecom:")
 }
 
 // ── Disabled Models Store ────────────────────────────────────────────────────
@@ -4971,7 +5001,7 @@ async fn run_with_tools(
 
     let native_tools = provider.supports_tools();
 
-    let filtered_registry = {
+    let mut filtered_registry = {
         let registry_guard = tool_registry.read().await;
         if native_tools {
             apply_runtime_tool_filters(&registry_guard, &persona.config, skills, mcp_disabled)
@@ -4979,6 +5009,9 @@ async fn run_with_tools(
             registry_guard.clone_without(&[])
         }
     };
+    if should_disable_speak_tool(session_key, desired_reply_medium) {
+        filtered_registry = filtered_registry.clone_without(&["speak"]);
+    }
 
     // Use a minimal prompt without tool schemas for providers that don't support tools.
     // This reduces context size and avoids confusing the LLM with unusable instructions.
@@ -5014,6 +5047,12 @@ async fn run_with_tools(
     // Keep the runtime datetime/date sentence as the final prompt line for better cache locality.
     let system_prompt =
         apply_voice_reply_suffix(system_prompt, desired_reply_medium, runtime_context);
+    let system_prompt = apply_wecom_voice_guardrails(
+        system_prompt,
+        session_key,
+        desired_reply_medium,
+        runtime_context,
+    );
 
     // Determine sandbox mode for this session.
     let session_is_sandboxed = if let Some(ref router) = state.sandbox_router {
@@ -5826,6 +5865,12 @@ async fn run_streaming(
     // Keep the runtime datetime/date sentence as the final prompt line for better cache locality.
     let system_prompt =
         apply_voice_reply_suffix(system_prompt, desired_reply_medium, runtime_context);
+    let system_prompt = apply_wecom_voice_guardrails(
+        system_prompt,
+        session_key,
+        desired_reply_medium,
+        runtime_context,
+    );
 
     let mut messages: Vec<ChatMessage> = Vec::new();
     messages.push(ChatMessage::system(system_prompt));
@@ -6238,23 +6283,9 @@ async fn deliver_channel_replies(
             "telegram reply delivery starting"
         );
     }
-    let outbound = match state.services.channel_outbound_arc() {
-        Some(o) => o,
-        None => {
-            if is_telegram_session {
-                info!(
-                    session_key,
-                    target_count = targets.len(),
-                    "telegram reply delivery skipped: outbound unavailable"
-                );
-            }
-            return;
-        },
-    };
     // Drain buffered status log entries to build a logbook suffix.
     let status_log = state.drain_channel_status_log(session_key).await;
     deliver_channel_replies_to_targets(
-        outbound,
         targets,
         session_key,
         text,
@@ -6319,16 +6350,21 @@ async fn send_retry_status_to_channels(
         return;
     }
 
-    let outbound = match state.services.channel_outbound_arc() {
-        Some(o) => o,
-        None => return,
-    };
-
     let message = format_channel_retry_message(error_obj, retry_after);
     let mut tasks = Vec::with_capacity(targets.len());
     for target in targets {
-        let outbound = Arc::clone(&outbound);
         let message = message.clone();
+        let outbound = match state.services.channel_outbound_for(target.channel_type) {
+            Some(o) => o,
+            None => {
+                warn!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    "no channel outbound configured for retry status"
+                );
+                continue;
+            },
+        };
         tasks.push(tokio::spawn(async move {
             let reply_to = target.message_id.as_deref();
             if let Err(e) = outbound
@@ -6359,16 +6395,21 @@ async fn deliver_channel_error(state: &Arc<GatewayState>, session_key: &str, err
         return;
     }
 
-    let outbound = match state.services.channel_outbound_arc() {
-        Some(o) => o,
-        None => return,
-    };
-
     let error_text = format_channel_error_message(error_obj);
     let logbook_html = format_logbook_html(&status_log);
     let mut tasks = Vec::with_capacity(targets.len());
     for target in targets {
-        let outbound = Arc::clone(&outbound);
+        let outbound = match state.services.channel_outbound_for(target.channel_type) {
+            Some(o) => o,
+            None => {
+                warn!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    "no channel outbound configured for error reply"
+                );
+                continue;
+            },
+        };
         let error_text = error_text.clone();
         let logbook_html = logbook_html.clone();
         tasks.push(tokio::spawn(async move {
@@ -6406,7 +6447,6 @@ async fn deliver_channel_error(state: &Arc<GatewayState>, session_key: &str, err
 }
 
 async fn deliver_channel_replies_to_targets(
-    outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound>,
     targets: Vec<moltis_channels::ChannelReplyTarget>,
     session_key: &str,
     text: &str,
@@ -6420,7 +6460,17 @@ async fn deliver_channel_replies_to_targets(
     let logbook_html = format_logbook_html(&status_log);
     let mut tasks = Vec::with_capacity(targets.len());
     for target in targets {
-        let outbound = Arc::clone(&outbound);
+        let outbound = match state.services.channel_outbound_for(target.channel_type) {
+            Some(o) => o,
+            None => {
+                warn!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    "no channel outbound configured for reply delivery"
+                );
+                continue;
+            },
+        };
         let state = Arc::clone(&state);
         let session_key = session_key.clone();
         let text = text.clone();
@@ -6567,6 +6617,72 @@ async fn deliver_channel_replies_to_targets(
                             );
                         }
                     },
+                },
+                moltis_channels::ChannelType::Wecom => {
+                    if text_already_streamed {
+                        if let Some(mut payload) = tts_payload {
+                            payload.text.clear();
+                            if let Err(e) = outbound
+                                .send_media(&target.account_id, &target.chat_id, &payload, reply_to)
+                                .await
+                            {
+                                warn!(
+                                    account_id = target.account_id,
+                                    chat_id = target.chat_id,
+                                    "failed to send wecom voice reply: {e}"
+                                );
+                            }
+                        }
+                        return;
+                    }
+
+                    if let Some(mut payload) = tts_payload {
+                        let transcript = std::mem::take(&mut payload.text);
+                        payload.text.clear();
+                        if let Err(e) = outbound
+                            .send_media(&target.account_id, &target.chat_id, &payload, reply_to)
+                            .await
+                        {
+                            let message = e.to_string();
+                            let message = if message.len() > 200 {
+                                format!("{}…", truncate_at_char_boundary(&message, 200))
+                            } else {
+                                message
+                            };
+                            warn!(
+                                account_id = target.account_id,
+                                chat_id = target.chat_id,
+                                error = %message,
+                                "failed to send wecom media reply"
+                            );
+                            if !transcript.is_empty() {
+                                if let Err(e) = outbound
+                                    .send_text(
+                                        &target.account_id,
+                                        &target.chat_id,
+                                        &transcript,
+                                        reply_to,
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        account_id = target.account_id,
+                                        chat_id = target.chat_id,
+                                        "failed to send wecom transcript reply: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    } else if let Err(e) = outbound
+                        .send_text(&target.account_id, &target.chat_id, &text, reply_to)
+                        .await
+                    {
+                        warn!(
+                            account_id = target.account_id,
+                            chat_id = target.chat_id,
+                            "failed to send wecom reply: {e}"
+                        );
+                    }
                 },
             }
         }));
@@ -6871,11 +6987,6 @@ async fn send_screenshot_to_channels(
         return;
     }
 
-    let outbound = match state.services.channel_outbound_arc() {
-        Some(o) => o,
-        None => return,
-    };
-
     let payload = ReplyPayload {
         text: String::new(), // No caption, just the image
         media: Some(MediaAttachment {
@@ -6888,11 +6999,21 @@ async fn send_screenshot_to_channels(
 
     let mut tasks = Vec::with_capacity(targets.len());
     for target in targets {
-        let outbound = Arc::clone(&outbound);
+        let outbound = match state.services.channel_outbound_for(target.channel_type) {
+            Some(o) => o,
+            None => {
+                warn!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    "no channel outbound configured for screenshot"
+                );
+                continue;
+            },
+        };
         let payload = payload.clone();
         tasks.push(tokio::spawn(async move {
             match target.channel_type {
-                moltis_channels::ChannelType::Telegram => {
+                moltis_channels::ChannelType::Telegram | moltis_channels::ChannelType::Wecom => {
                     let reply_to = target.message_id.as_deref();
                     if let Err(e) = outbound
                         .send_media(&target.account_id, &target.chat_id, &payload, reply_to)
@@ -6912,7 +7033,7 @@ async fn send_screenshot_to_channels(
                         debug!(
                             account_id = target.account_id,
                             chat_id = target.chat_id,
-                            "sent screenshot to telegram"
+                            "sent screenshot to channel"
                         );
                     }
                 },
@@ -6941,16 +7062,21 @@ async fn send_location_to_channels(
         return;
     }
 
-    let outbound = match state.services.channel_outbound_arc() {
-        Some(o) => o,
-        None => return,
-    };
-
     let title_owned = title.map(String::from);
 
     let mut tasks = Vec::with_capacity(targets.len());
     for target in targets {
-        let outbound = Arc::clone(&outbound);
+        let outbound = match state.services.channel_outbound_for(target.channel_type) {
+            Some(o) => o,
+            None => {
+                warn!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    "no channel outbound configured for location"
+                );
+                continue;
+            },
+        };
         let title_ref = title_owned.clone();
         tasks.push(tokio::spawn(async move {
             let reply_to = target.message_id.as_deref();
@@ -7428,11 +7554,14 @@ mod tests {
             chat_id: "123".to_string(),
             message_id: None,
         }];
-        let state = GatewayState::new(test_auth(), crate::services::GatewayServices::noop());
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(
+            moltis_channels::ChannelType::Telegram,
+            outbound,
+        );
+        let state = GatewayState::new(test_auth(), services);
 
         let start = Instant::now();
         deliver_channel_replies_to_targets(
-            outbound,
             targets,
             "session:test",
             "hello",
@@ -7458,7 +7587,10 @@ mod tests {
                 calls: Arc::clone(&calls),
                 delay: Duration::from_millis(0),
             });
-        let services = crate::services::GatewayServices::noop().with_channel_outbound(outbound);
+        let services = crate::services::GatewayServices::noop().with_channel_outbound(
+            moltis_channels::ChannelType::Telegram,
+            outbound,
+        );
         let state = GatewayState::new(test_auth(), services);
         let target = moltis_channels::ChannelReplyTarget {
             channel_type: moltis_channels::ChannelType::Telegram,

@@ -116,9 +116,13 @@ rustls-pemfile = "2"
 time           = "0.3"
 tokio-rustls   = "0.26"
 # Cryptography / authentication
+aes               = "0.8"
 argon2            = "0.5"
+cbc               = "0.1"
+hex               = "0.4"
 p256              = "0.13"
 password-hash     = "0.5"
+sha1              = "0.10"
 webauthn-rs       = "0.5"
 webauthn-rs-proto = "0.5"
 # Web / HTTP utilities
@@ -140,6 +144,7 @@ metrics-tracing-context     = "0.16"
 image          = { default-features = false, features = ["jpeg", "png", "webp"], version = "0.25" }
 ipnet          = "2"
 pulldown-cmark = { default-features = false, version = "0.12" }
+quick-xml      = "0.36"
 # Allocator
 tikv-jemallocator = "0.6"
 # Filesystem / archiving
