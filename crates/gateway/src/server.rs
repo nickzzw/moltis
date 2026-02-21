@@ -2929,6 +2929,9 @@ pub async fn start_gateway(
             tool_registry.register(Box::new(moltis_tools::skill_tools::CreateSkillTool::new(
                 data_dir.clone(),
             )));
+            tool_registry.register(Box::new(moltis_tools::skill_tools::ReadSkillTool::new(
+                data_dir.clone(),
+            )));
             tool_registry.register(Box::new(moltis_tools::skill_tools::UpdateSkillTool::new(
                 data_dir.clone(),
             )));

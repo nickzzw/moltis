@@ -1,4 +1,4 @@
-//! Agent tools for creating, updating, and deleting personal skills at runtime.
+//! Agent tools for creating, reading, updating, and deleting personal skills at runtime.
 //! Skills are written to `<data_dir>/skills/<name>/SKILL.md` (Personal source).
 
 use std::path::{Path, PathBuf};
@@ -194,6 +194,88 @@ impl AgentTool for UpdateSkillTool {
         Ok(json!({
             "updated": true,
             "path": skill_dir.display().to_string()
+        }))
+    }
+}
+
+/// Tool that reads an existing personal skill from `<data_dir>/skills/`.
+pub struct ReadSkillTool {
+    data_dir: PathBuf,
+}
+
+impl ReadSkillTool {
+    pub fn new(data_dir: PathBuf) -> Self {
+        Self { data_dir }
+    }
+
+    fn skills_dir(&self) -> PathBuf {
+        self.data_dir.join("skills")
+    }
+}
+
+#[async_trait]
+impl AgentTool for ReadSkillTool {
+    fn name(&self) -> &str {
+        "read_skill"
+    }
+
+    fn description(&self) -> &str {
+        "Read a personal skill document from <data_dir>/skills/<name>/SKILL.md (host-side, read-only). \
+         Use this to inspect skill instructions; do not use exec for skill docs."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Skill name to read"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, params: Value) -> Result<Value> {
+        const MAX_SKILL_BYTES: u64 = 200_000;
+
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing 'name'"))?;
+
+        if !moltis_skills::parse::validate_name(name) {
+            bail!("invalid skill name '{name}'");
+        }
+
+        let skill_file = self.skills_dir().join(name).join("SKILL.md");
+        if !skill_file.exists() {
+            bail!("skill '{name}' not found");
+        }
+
+        let canonical_base = self
+            .skills_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| self.skills_dir().clone());
+        let canonical_target = skill_file
+            .canonicalize()
+            .unwrap_or_else(|_| skill_file.clone());
+        if !canonical_target.starts_with(&canonical_base) {
+            bail!("can only read personal skills");
+        }
+
+        let metadata = tokio::fs::metadata(&skill_file).await?;
+        if metadata.len() > MAX_SKILL_BYTES {
+            bail!("skill '{name}' is too large to read");
+        }
+
+        let content = tokio::fs::read_to_string(&skill_file).await?;
+
+        Ok(json!({
+            "name": name,
+            "path": skill_file.display().to_string(),
+            "content": content
         }))
     }
 }
@@ -404,6 +486,36 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path().join("skills/my-skill/SKILL.md")).unwrap();
         assert!(content.contains("description: updated"));
         assert!(content.contains("new body"));
+    }
+
+    #[tokio::test]
+    async fn test_read_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let create = CreateSkillTool::new(tmp.path().to_path_buf());
+        let read = ReadSkillTool::new(tmp.path().to_path_buf());
+
+        create
+            .execute(json!({
+                "name": "my-skill",
+                "description": "original",
+                "body": "original body"
+            }))
+            .await
+            .unwrap();
+
+        let result = read.execute(json!({ "name": "my-skill" })).await.unwrap();
+        let content = result["content"].as_str().unwrap();
+        assert!(content.contains("name: my-skill"));
+        assert!(content.contains("original body"));
+    }
+
+    #[tokio::test]
+    async fn test_read_missing_skill_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let read = ReadSkillTool::new(tmp.path().to_path_buf());
+
+        let result = read.execute(json!({ "name": "missing" })).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
